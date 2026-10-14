@@ -11,3 +11,4 @@ sentence-transformers
 langgraph-checkpoint-sqlite
 fastapi
 uvicorn
+streamlit
