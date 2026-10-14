@@ -2,11 +2,12 @@ import sqlite3
 import chromadb
 from sentence_transformers import SentenceTransformer
 
-class VectorSchemaRetreiver:
+class VectorSchemaRetriever:
     def __init__(self,db_path:str):
-        self.dp_path=db_path
+        self.db_path=db_path
 
         self.encoder=SentenceTransformer("all-MiniLM-L6-v2")
+        self.chroma_client=chromadb.Client()
         self.collection=self.chroma_client.get_or_create_collection(name="database_schema")
         self._index_schema()
 
@@ -43,7 +44,7 @@ class VectorSchemaRetreiver:
             ids=ids
         )
 
-    def retreive_relevant_schema(self,user_query:str,n_results:int=2)->str:
+    def retrieve_relevant_schema(self,user_query:str,n_results:int=2)->str:
         """Finds the most sematically relevant tables/columns for a given user query."""
         query_embedding=self.encoder.encode([user_query]).tolist()
 
@@ -56,5 +57,5 @@ class VectorSchemaRetreiver:
         for metadata in results["metadatas"][0]:
             table=metadata["table_name"]
             retrieved_schema[table]=eval(metadata["columns"])
-            
+
         return str(retrieved_schema)
