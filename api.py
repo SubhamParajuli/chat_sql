@@ -54,7 +54,7 @@ async def lifespan(app:FastAPI):
     os.makedirs("data",exist_ok=True)
 
     #initialize model
-    model=ChatGroq(model="qwen/3.8-27b",temperature=0)
+    model=ChatGroq(model="qwen/qwen3.8-27b",temperature=0)
 
     #initialize default vector schema retriever
     schema_retriever=VectorSchemaRetriever(default_db_path)

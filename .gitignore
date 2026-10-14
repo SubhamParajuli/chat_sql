@@ -9,3 +9,4 @@ wheels/
 # Virtual environments
 .venv
 data
+text_to_sql_benchmark
