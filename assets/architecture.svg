@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="820" viewBox="0 0 1600 820" role="img" aria-labelledby="title desc">
+  <title id="title">Text-to-SQL Agent architecture</title>
+  <desc id="desc">A user talks through Streamlit to FastAPI, which orchestrates a LangGraph workflow. The workflow retrieves SQLite schema context, calls Groq, validates SQL, runs it against SQLite, and stores conversation checkpoints.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#0b1020"/><stop offset="1" stop-color="#101b38"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#67e8f9"/><stop offset="1" stop-color="#818cf8"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="12" stdDeviation="15" flood-color="#020617" flood-opacity=".45"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+    <style>
+      .title { font: 700 36px Arial, sans-serif; fill: #f8fafc; }
+      .subtitle { font: 400 18px Arial, sans-serif; fill: #94a3b8; }
+      .label { font: 700 19px Arial, sans-serif; fill: #f8fafc; }
+      .body { font: 400 15px Arial, sans-serif; fill: #cbd5e1; }
+      .small { font: 600 13px Arial, sans-serif; fill: #a5b4fc; letter-spacing: .8px; }
+      .line { stroke: #94a3b8; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #64748b; stroke-width: 2; fill: none; stroke-dasharray: 7 7; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1600" height="820" rx="28" fill="url(#bg)"/>
+  <circle cx="1450" cy="90" r="260" fill="#312e81" opacity=".23"/>
+  <circle cx="130" cy="790" r="280" fill="#155e75" opacity=".18"/>
+  <text x="80" y="85" class="title">Text-to-SQL Agent</text>
+  <text x="80" y="120" class="subtitle">From natural-language question to guarded SQLite result</text>
+
+  <g filter="url(#shadow)">
+    <rect x="80" y="205" width="250" height="150" rx="18" fill="#172554" stroke="#38bdf8" stroke-opacity=".7"/>
+    <text x="112" y="255" class="small">INTERFACE</text>
+    <text x="112" y="290" class="label">Streamlit UI</text>
+    <text x="112" y="320" class="body">Chat, thread controls,</text>
+    <text x="112" y="342" class="body">SQLite database upload</text>
+
+    <rect x="430" y="205" width="270" height="150" rx="18" fill="#1e1b4b" stroke="#818cf8" stroke-opacity=".8"/>
+    <text x="462" y="255" class="small">SERVICE</text>
+    <text x="462" y="290" class="label">FastAPI</text>
+    <text x="462" y="320" class="body">/chat and /upload-db</text>
+    <text x="462" y="342" class="body">Session and resource manager</text>
+
+    <rect x="800" y="170" width="390" height="310" rx="22" fill="#172554" stroke="url(#accent)" stroke-width="2"/>
+    <text x="835" y="220" class="small">ORCHESTRATION</text>
+    <text x="835" y="255" class="label">LangGraph workflow</text>
+    <rect x="835" y="285" width="320" height="46" rx="10" fill="#1e293b"/>
+    <text x="855" y="315" class="body">1. Generate SQL with Groq</text>
+    <rect x="835" y="343" width="320" height="46" rx="10" fill="#1e293b"/>
+    <text x="855" y="373" class="body">2. Validate and execute SQL</text>
+    <rect x="835" y="401" width="320" height="46" rx="10" fill="#1e293b"/>
+    <text x="855" y="431" class="body">3. Summarize rows for the user</text>
+
+    <rect x="1290" y="205" width="230" height="150" rx="18" fill="#132e2a" stroke="#2dd4bf" stroke-opacity=".75"/>
+    <text x="1322" y="255" class="small">MODEL</text>
+    <text x="1322" y="290" class="label">Groq LLM</text>
+    <text x="1322" y="320" class="body">SQL generation and</text>
+    <text x="1322" y="342" class="body">answer synthesis</text>
+
+    <rect x="250" y="570" width="310" height="145" rx="18" fill="#132e2a" stroke="#2dd4bf" stroke-opacity=".75"/>
+    <text x="282" y="620" class="small">SCHEMA CONTEXT</text>
+    <text x="282" y="655" class="label">VectorSchemaRetriever</text>
+    <text x="282" y="684" class="body">Chroma + sentence embeddings</text>
+
+    <rect x="690" y="570" width="280" height="145" rx="18" fill="#2a1f11" stroke="#fbbf24" stroke-opacity=".8"/>
+    <text x="722" y="620" class="small">SAFETY</text>
+    <text x="722" y="655" class="label">AST guardrail</text>
+    <text x="722" y="684" class="body">SELECT-only + row limit</text>
+
+    <rect x="1100" y="570" width="320" height="145" rx="18" fill="#1f2937" stroke="#94a3b8" stroke-opacity=".8"/>
+    <text x="1132" y="620" class="small">DATA + STATE</text>
+    <text x="1132" y="655" class="label">SQLite + checkpoints</text>
+    <text x="1132" y="684" class="body">Enterprise or uploaded database</text>
+  </g>
+
+  <path d="M330 280 H430" class="line"/>
+  <path d="M700 280 H800" class="line"/>
+  <path d="M1190 280 H1290" class="line"/>
+  <path d="M405 570 V480 H875" class="dash"/>
+  <path d="M830 570 V480 H970" class="dash"/>
+  <path d="M1260 570 V480 H1090" class="dash"/>
+  <text x="92" y="770" class="subtitle">Schema-aware generation • Guarded read-only SQL • Local SQLite execution</text>
+</svg>
