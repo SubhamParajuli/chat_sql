@@ -16,23 +16,6 @@ class AgentState(TypedDict):
     error_count: int
 
 
-# PILLAR 1: Schema Context Optimization (Simple Version)
-
-def get_lightweight_schema(db_path: str) -> str:
-    """Reads table schemas so we only pass what's needed."""
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-    tables = [row[0] for row in cursor.fetchall()]
-    
-    schema = {}
-    for table in tables:
-        cursor.execute(f"PRAGMA table_info({table});")
-        schema[table] = [col[1] for col in cursor.fetchall()]
-    conn.close()
-    return json.dumps(schema)
-
-
 def sql_workflow(model:ChatGroq,schema_retriever:VectorSchemaRetriever,checkpointer=None):
     # STEP 1: The LLM writes the SQL query based on user prompt
     async def generate_sql_node(state: AgentState):

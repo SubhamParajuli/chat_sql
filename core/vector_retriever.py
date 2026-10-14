@@ -10,7 +10,8 @@ class VectorSchemaRetriever:
         self.chroma_client=chromadb.Client()
         self.collection=self.chroma_client.get_or_create_collection(name="database_schema")
         self._index_schema()
-
+        
+    # PILLAR 1: Schema Context Optimization (Simple Version)
     def _index_schema(self):
         """Introspects SQLite and indexes table/column metadata into Chroma."""
         conn = sqlite3.connect(self.db_path)
