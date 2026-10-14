@@ -1,44 +1,102 @@
-import os
-import operator
-from dotenv import load_dotenv
-from typing import Annotated, TypedDict,List,Any
-from langchain_core.messages import HumanMessage,BaseMessage,ToolMessage,AIMessage
-from langchain_groq import ChatGroq
-from langgraph.graph import StateGraph , START,END
-from guardrails.ast_validator import enforce_sql_guardrails,SecurityError
-import json
 import sqlite3
+import json
+from typing import TypedDict,List
+from langchain_core.messages import BaseMessage,HumanMessage,AIMessage
+from langchain_groq import ChatGroq
+from langgraph.graph import START,END,StateGraph,add_messages
+from guardrails.ast_validator import enforce_sql_guardrails,SecurityError
 
-load_dotenv()
 
-#define state tracked across langgraph state machine
 
 class AgentState(TypedDict):
-    messages:Annotated[List[BaseMessage],operator.add]
+    messages:List[BaseMessage,add_messages]
     db_path:str
-    mcp_session : Any
-    error_count:int
+    sql_query:str
+    execution_result: str
 
 
+# PILLAR 1: Schema Context Optimization (Simple Version)
 
-#schema context optimization (for big database)
-def get_relevant_schema(db_path:str, user_prompt:str) ->str:
-    """
-    Introspects the database and filters relevant table schemas.
-    Alternative Rejected: Dumping all table schemas into the prompt. 
-    Why rejected: Causes token bloat, high cost, and severe accuracy degradation 
-    on databases with hundreds of tables.
-    """
-
-    conn=sqlite3.connect(db_path)
-    cursor=conn.cursor()
-    cursor.execute("SELECT name FROM sqlit_master WHERE type='table';")
-    tables=[row[0] for row in cursor.fetchall()]
-
-    schema_info={}
-
-    prompt_words=set(user_prompt.lower().split())
-
+def get_lightweight_schema(db_path: str) -> str:
+    """Reads table schemas so we only pass what's needed."""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = [row[0] for row in cursor.fetchall()]
+    
+    schema = {}
     for table in tables:
         cursor.execute(f"PRAGMA table_info({table});")
-        columns=[{"column":col[1],"type":col[2]} for col in cursor.fetchall()]
+        schema[table] = [col[1] for col in cursor.fetchall()]
+    conn.close()
+    return json.dumps(schema)
+
+
+def sql_workflow():
+    model=ChatGroq(model="llama-3.3-70b-versatile",temperature=0)
+
+    # STEP 1: The LLM writes the SQL query based on user prompt
+
+    def generate_sql_node(state:AgentState):
+        db_schema=get_lightweight_schema(state["db_path"])
+
+        prompt = (
+            f"You are a SQL generator. Database schema: {db_schema}\n"
+            f"User request: {state['messages'][-1].content}\n"
+            "Return ONLY a valid SQL SELECT statement. No markdown formatting, no explanations."
+        )
+
+        response=model.invoke([HumanMessage(content=prompt)])
+        raw_sql=response.content.strip()
+
+        print(f"LLM Generated SQL: {raw_sql}")
+        return{"sql_query":raw_sql}
+
+    # STEP 2: Pillar 2 (AST Guardrails) & Database Execution
+
+    def execute_sql_node(state:AgentState):
+        raw_sql=state["sql_query"]
+
+        # Apply Pillar 2 Guardrails (SqlGlot safety checks)
+        try:
+            safe_sql=enforce_sql_guardrails(raw_sql,max_row_limit=50)
+            print(f"[Workflow] Guardrail Passed. Executing: {safe_sql}")
+
+        except SecurityError as e:
+            return{"execution_result": f"Security Error: {e}"}
+
+        # Pillar 3: Self-Correction Setup (Catch DB errors)
+        try:
+            conn=sqlite3.connect(state["db_path"])
+            cursor=conn.cursor()
+            cursor.execute(safe_sql)
+            rows=cursor.fetchall()
+            conn.close()
+            return {"execution_result": str(rows)}
+
+        except Exception as db_err:
+            # If SQLite fails, we return the error so the LLM can try fixing it next turn!
+            error_msg = f"SQL Error: {db_err}. Please fix the query."
+            print(f"  [Junior Workflow] Database failed: {error_msg}")
+            return {"execution_result": error_msg}
+
+    # STEP 3: Final Answer generation
+    def summarize_node(state:AgentState):
+        result=state["execution_result"]
+        prompt=f"The user asked: '{state['messages'][-1].content}. The query result was: {result}. Write a short, friendly plain-English answer."
+        response=model.invoke(HumanMessage(content=prompt))
+        return {"messages":[AIMessage(content=response.content)]}
+
+    #Build Linear Graph Flow
+
+    workflow=StateGraph(AgentState)
+    workflow.add_node("generate_sql",generate_sql_node)
+    workflow.add_node("execute_sql",execute_sql_node)
+    workflow.add_node("summarize",summarize_node)
+
+    workflow.add_edge(START,"generate_sql")
+    workflow.add_edge("generate_sql","execute_sql")
+    workflow.add_edge("execute_sql","summarize")
+    workflow.add_edge("summarize",END)
+
+    return workflow.compile()
