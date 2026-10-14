@@ -9,3 +9,5 @@ pydantic>=2.0.0
 chromadb
 sentence-transformers
 langgraph-checkpoint-sqlite
+fastapi
+uvicorn
