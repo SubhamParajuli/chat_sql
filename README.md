@@ -42,57 +42,33 @@ For a question such as “Which Engineering employees earn more than 100000?”,
 
 ## Architecture
 
-%%{init: {
-  'theme': 'dark',
-  'themeVariables': {
-    'darkMode': true,
-    'background': '#0D1117',
-    'primaryColor': '#161B22',
-    'primaryTextColor': '#F0F6FC',
-    'primaryBorderColor': '#30363D',
-    'lineColor': '#8B949E',
-    'fontSize': '13px',
-    'fontFamily': '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
-  }
-}}%%
-
+```mermaid
 flowchart TD
-    classDef client fill:#161B22,stroke:#58A6FF,stroke-width:1.5px,color:#F0F6FC;
-    classDef state fill:#161B22,stroke:#D29922,stroke-width:1.5px,color:#F0F6FC;
-    classDef core fill:#1F2937,stroke:#38BDF8,stroke-width:2px,color:#F0F6FC;
-    classDef guard fill:#064E3B,stroke:#34D399,stroke-width:2px,color:#ECFDF5;
-    classDef error fill:#4C0519,stroke:#F87171,stroke-width:1.5px,color:#FEF2F2;
-    classDef db fill:#161B22,stroke:#A855F7,stroke-width:1.5px,color:#F0F6FC;
+    User([User / Streamlit UI]) --> API[FastAPI Backend]
 
-    User([User Prompt / Streamlit UI]):::client --> API[FastAPI Backend Endpoint]:::client
-
-    subgraph AgentEngine ["LangGraph Agentic Engine & State Machine"]
-        API --> StateManager[State Checkpointer & Memory]:::state
-        StateManager --> Retriever[Chroma DB: Schema Context Vector Search]:::db
-        Retriever --> PromptGen[Augmented Prompt Builder]:::state
-        PromptGen --> LLM[Open-Source LLM: Qwen 3.8-27B via Groq API]:::core
+    subgraph AgentEngine ["⚡ LangGraph Agent Engine & State Machine"]
+        API --> State[State Manager & Checkpointer]
+        State --> VectorDB[(Chroma DB: Schema Context Retrieval)]
+        VectorDB --> Prompt[Augmented Prompt Builder]
+        Prompt --> LLM[Open-Source LLM: Qwen via Groq API]
         
-        LLM --> GenSQL[Candidate SQL Query]:::core
-        
-        GenSQL --> Guardrail{sqlglot AST Guardrail}:::guard
+        LLM --> CandidateSQL[Generated SQL Query]
+        CandidateSQL --> Guardrail{sqlglot AST Guardrail}
         
         %% Guardrail Validation Branches
-        Guardrail -- "Non-SELECT / Injection / Unsafe" --> ErrorLoop[AST Error Parser & Retry Loop]:::error
+        Guardrail -- "❌ Non-SELECT / Unsafe" --> ErrorLoop[AST Error Parser & Retry Loop]
         ErrorLoop --> LLM
         
-        Guardrail -- "Safe Read-Only SELECT" --> Exec[Database Execution Engine]:::db
+        Guardrail -- "✅ Read-Only SELECT" --> DBExec[(Database Execution Engine)]
     end
 
-    Exec --> SuccessCheck{Execution Success?}:::state
+    DBExec --> DBCheck{Runtime Execution?}
     
     %% DB Runtime Execution Branches
-    SuccessCheck -- "DB Runtime / Syntax Exception" --> DBErrorLoop[DB Exception Handler]:::error
-    DBErrorLoop --> LLM
-    
-    SuccessCheck -- "Success" --> UI[FastAPI & Streamlit Data Visualizer]:::client
-    UI --> Output([Tabular Data & Execution Trace]):::client
-
-<p align="center"><em>The request path: UI → API → schema-aware workflow → guarded SQLite result.</em></p>
+    DBCheck -- "❌ DB Syntax / Schema Error" --> ErrorLoop
+    DBCheck -- "✅ Success" --> Visualizer[FastAPI & Streamlit Data Visualizer]
+    Visualizer --> Output([Tabular Output & Results])
+```
 
 ### Main components
 
