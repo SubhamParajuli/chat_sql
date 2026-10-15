@@ -42,39 +42,55 @@ For a question such as “Which Engineering employees earn more than 100000?”,
 
 ## Architecture
 
-```mermaid
-graph TD
-    User([User Query / Streamlit UI]) --> API[FastAPI Backend]
-    
-    subgraph Agentic Orchestration [LangGraph State Machine]
-        API --> StateManager[State Manager & Checkpointer]
-        StateManager --> Retriever[Chroma DB: Dynamic Schema Context Retrieval]
-        Retriever --> PromptGen[Augmented Prompt Constructor]
-        PromptGen --> LLM[Open-Source LLM: Qwen via Groq API]
+%%{init: {
+  'theme': 'dark',
+  'themeVariables': {
+    'darkMode': true,
+    'background': '#0D1117',
+    'primaryColor': '#161B22',
+    'primaryTextColor': '#F0F6FC',
+    'primaryBorderColor': '#30363D',
+    'lineColor': '#8B949E',
+    'fontSize': '13px',
+    'fontFamily': '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+  }
+}}%%
+
+flowchart TD
+    classDef client fill:#161B22,stroke:#58A6FF,stroke-width:1.5px,color:#F0F6FC;
+    classDef state fill:#161B22,stroke:#D29922,stroke-width:1.5px,color:#F0F6FC;
+    classDef core fill:#1F2937,stroke:#38BDF8,stroke-width:2px,color:#F0F6FC;
+    classDef guard fill:#064E3B,stroke:#34D399,stroke-width:2px,color:#ECFDF5;
+    classDef error fill:#4C0519,stroke:#F87171,stroke-width:1.5px,color:#FEF2F2;
+    classDef db fill:#161B22,stroke:#A855F7,stroke-width:1.5px,color:#F0F6FC;
+
+    User([User Prompt / Streamlit UI]):::client --> API[FastAPI Backend Endpoint]:::client
+
+    subgraph AgentEngine ["LangGraph Agentic Engine & State Machine"]
+        API --> StateManager[State Checkpointer & Memory]:::state
+        StateManager --> Retriever[Chroma DB: Schema Context Vector Search]:::db
+        Retriever --> PromptGen[Augmented Prompt Builder]:::state
+        PromptGen --> LLM[Open-Source LLM: Qwen 3.8-27B via Groq API]:::core
         
-        LLM --> GenSQL[Generated SQL Query]
+        LLM --> GenSQL[Candidate SQL Query]:::core
         
-        GenSQL --> Guardrail{sqlglot AST Validator}
+        GenSQL --> Guardrail{sqlglot AST Guardrail}:::guard
         
-        %% Validation Branches
-        Guardrail -- "Invalid / Non-SELECT / Unsafe" --> ErrorHandler[Error Parser & Feedback Loop]
-        ErrorHandler --> LLM
+        %% Guardrail Validation Branches
+        Guardrail -- "Non-SELECT / Injection / Unsafe" --> ErrorLoop[AST Error Parser & Retry Loop]:::error
+        ErrorLoop --> LLM
         
-        Guardrail -- "Valid & Safe (Read-Only + Limit)" --> Exec[Database Execution Engine]
+        Guardrail -- "Safe Read-Only SELECT" --> Exec[Database Execution Engine]:::db
     end
 
-    Exec --> Success{Execution Success?}
+    Exec --> SuccessCheck{Execution Success?}:::state
     
-    Success -- "DB Error (Syntax/Schema Mismatch)" --> DBErrorHandler[SQL Exception Handler]
-    DBErrorHandler --> LLM
+    %% DB Runtime Execution Branches
+    SuccessCheck -- "DB Runtime / Syntax Exception" --> DBErrorLoop[DB Exception Handler]:::error
+    DBErrorLoop --> LLM
     
-    Success -- "Success" --> UI[FastAPI & Streamlit UI Rendering]
-    UI --> UserOut([User Result & Data Tables])
-
-    style Guardrail fill:#f9f,stroke:#333,stroke-width:2px
-    style LLM fill:#bbf,stroke:#333,stroke-width:2px
-    style Retriever fill:#bfb,stroke:#333,stroke-width:2px
-```
+    SuccessCheck -- "Success" --> UI[FastAPI & Streamlit Data Visualizer]:::client
+    UI --> Output([Tabular Data & Execution Trace]):::client
 
 <p align="center"><em>The request path: UI → API → schema-aware workflow → guarded SQLite result.</em></p>
 
