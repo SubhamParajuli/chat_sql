@@ -42,7 +42,39 @@ For a question such as “Which Engineering employees earn more than 100000?”,
 
 ## Architecture
 
-![Text-to-SQL Agent architecture](assets/architecture.svg)
+```mermaid
+graph TD
+    User([User Query / Streamlit UI]) --> API[FastAPI Backend]
+    
+    subgraph Agentic Orchestration [LangGraph State Machine]
+        API --> StateManager[State Manager & Checkpointer]
+        StateManager --> Retriever[Chroma DB: Dynamic Schema Context Retrieval]
+        Retriever --> PromptGen[Augmented Prompt Constructor]
+        PromptGen --> LLM[Open-Source LLM: Qwen via Groq API]
+        
+        LLM --> GenSQL[Generated SQL Query]
+        
+        GenSQL --> Guardrail{sqlglot AST Validator}
+        
+        %% Validation Branches
+        Guardrail -- "Invalid / Non-SELECT / Unsafe" --> ErrorHandler[Error Parser & Feedback Loop]
+        ErrorHandler --> LLM
+        
+        Guardrail -- "Valid & Safe (Read-Only + Limit)" --> Exec[Database Execution Engine]
+    end
+
+    Exec --> Success{Execution Success?}
+    
+    Success -- "DB Error (Syntax/Schema Mismatch)" --> DBErrorHandler[SQL Exception Handler]
+    DBErrorHandler --> LLM
+    
+    Success -- "Success" --> UI[FastAPI & Streamlit UI Rendering]
+    UI --> UserOut([User Result & Data Tables])
+
+    style Guardrail fill:#f9f,stroke:#333,stroke-width:2px
+    style LLM fill:#bbf,stroke:#333,stroke-width:2px
+    style Retriever fill:#bfb,stroke:#333,stroke-width:2px
+```
 
 <p align="center"><em>The request path: UI → API → schema-aware workflow → guarded SQLite result.</em></p>
 
