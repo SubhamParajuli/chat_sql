@@ -43,6 +43,7 @@ For a question such as “Which Engineering employees earn more than 100000?”,
 ## Architecture
 
 ```mermaid
+```mermaid
 graph TD
     User([User Query / Streamlit UI]) --> API[FastAPI Backend]
     
