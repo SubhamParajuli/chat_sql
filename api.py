@@ -130,14 +130,17 @@ async def chat_with_agent(request: ChatRequest):
     if not os.path.exists(active_db_path):
         raise HTTPException(status_code=404, detail=f"Database not found at: {active_db_path}")
     
-    # Ensure retriever exists for this database
+    # 1. Select the retriever per database from resources["retrievers"]
     if active_db_path not in resources["retrievers"]:
         resources["retrievers"][active_db_path] = VectorSchemaRetriever(active_db_path)
+    
+    active_retriever = resources["retrievers"][active_db_path]
 
     # Session thread management
     thread_id = request.thread_id or f"session_{uuid.uuid4().hex[:8]}"
     config = {"configurable": {"thread_id": thread_id}}
     
+    # Pass the active retriever explicitly in state/configurable context if your workflow requires it
     initial_state = {
         "messages": [HumanMessage(content=request.message)],
         "db_path": active_db_path,
@@ -145,6 +148,9 @@ async def chat_with_agent(request: ChatRequest):
         "execution_result": "",
         "error_count": 0
     }
+    
+    # If your workflow/graph runnable accepts the retriever via configurable or state, ensure it's bound here:
+    config["configurable"]["schema_retriever"] = active_retriever
     
     final_sql = ""
     final_result = ""

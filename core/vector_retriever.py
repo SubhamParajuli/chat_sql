@@ -14,7 +14,7 @@ class VectorSchemaRetriever:
     # PILLAR 1: Schema Context Optimization (Simple Version)
     def _index_schema(self):
         """Introspects SQLite and indexes table/column metadata into Chroma."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
         tables = [row[0] for row in cursor.fetchall()]

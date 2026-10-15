@@ -1,15 +1,14 @@
 import sqlite3
-import json
-from typing import TypedDict,List
+from typing import TypedDict,List,Annotated
 from langchain_core.messages import BaseMessage,HumanMessage,AIMessage
 from langchain_groq import ChatGroq
-from langgraph.graph import START,END,StateGraph
+from langgraph.graph import START,END,StateGraph,add_messages
 from guardrails.ast_validator import enforce_sql_guardrails,SecurityError
 from core.vector_retriever import VectorSchemaRetriever
 
 
 class AgentState(TypedDict):
-    messages: List[BaseMessage]
+    messages: Annotated[List[BaseMessage],add_messages]
     db_path:str
     sql_query:str
     execution_result: str
