@@ -1,62 +1,100 @@
 import sqlite3
+
 import chromadb
 from sentence_transformers import SentenceTransformer
 
+
 class VectorSchemaRetriever:
-    def __init__(self,db_path:str):
-        self.db_path=db_path
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self.encoder = SentenceTransformer("all-MiniLM-L6-v2")
+        self.chroma = chromadb.Client()
+        self.collection = self.chroma.get_or_create_collection("database_schema")
 
-        self.encoder=SentenceTransformer("all-MiniLM-L6-v2")
-        self.chroma_client=chromadb.Client()
-        self.collection=self.chroma_client.get_or_create_collection(name="database_schema")
+        self.table_schemas = {}
+        self.last_retrieved_tables = []
         self._index_schema()
-        
-    # PILLAR 1: Schema Context Optimization (Simple Version)
+
+
+
     def _index_schema(self):
-        """Introspects SQLite and indexes table/column metadata into Chroma."""
-        conn = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
+        conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-        tables = [row[0] for row in cursor.fetchall()]
 
-        documents = []
-        metadatas = []
-        ids = []
+        cursor.execute("""
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+            AND name NOT LIKE 'sqlite_%'
+        """)
+        tables = cursor.fetchall()
 
-        for table in tables:
-            cursor.execute(f"PRAGMA table_info({table});")
-            columns = [col[1] for col in cursor.fetchall()]
-            
-            # Create descriptive text chunks for semantic matching
-            doc_text = f"Table '{table}' contains columns: {', '.join(columns)}."
-            
-            documents.append(doc_text)
-            metadatas.append({"table_name": table, "columns": str(columns)})
-            ids.append(table)
+
+
+        for (table,) in tables:
+            cursor.execute(f"PRAGMA table_info('{table}')")
+            columns = cursor.fetchall()
+            column_names = [col[1] for col in columns]
+
+            schema = f"{table} ({', '.join(column_names)})"
+            self.table_schemas[table] = schema
+
+            document = f"Table {table} contains columns: {', '.join(column_names)}"
+            embedding = self.encoder.encode(document).tolist()
+
+
+            self.collection.upsert(
+                ids=[table],
+                documents=[document],
+                embeddings=[embedding],
+                metadatas=[{"table": table}]
+            )
 
         conn.close()
 
-        # Embed and store in vector database
-        embeddings = self.encoder.encode(documents).tolist()
-        self.collection.upsert(
-            documents=documents,
-            embeddings=embeddings,
-            metadatas=metadatas,
-            ids=ids
+
+
+    def retrieve_relevant_schema(self, question: str, n_results: int = 4):
+        if not self.table_schemas:
+            self.last_retrieved_tables = []
+            return ""
+
+
+
+        embedding = self.encoder.encode(question).tolist()
+        results = self.collection.query(
+            query_embeddings=[embedding],
+            n_results=min(n_results, len(self.table_schemas))
         )
 
-    def retrieve_relevant_schema(self,user_query:str,n_results:int=2)->str:
-        """Finds the most sematically relevant tables/columns for a given user query."""
-        query_embedding=self.encoder.encode([user_query]).tolist()
-
-        results=self.collection.query(
-            query_embeddings=query_embedding,
-            n_results=n_results
-        )
-
-        retrieved_schema={}
+        tables = []
         for metadata in results["metadatas"][0]:
-            table=metadata["table_name"]
-            retrieved_schema[table]=eval(metadata["columns"])
+            table = metadata["table"]
+            if table not in tables:
+                tables.append(table)
 
-        return str(retrieved_schema)
+
+        # Include tables directly connected by foreign keys.
+        for table in list(tables):
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(f"PRAGMA foreign_key_list('{table}')")
+            foreign_keys = cursor.fetchall()
+
+
+            for fk in foreign_keys:
+                related_table = fk[2]
+                if related_table in self.table_schemas and related_table not in tables:
+                    tables.append(related_table)
+            conn.close()
+
+
+
+        self.last_retrieved_tables = tables.copy()
+
+        return "\n".join(self.table_schemas[table] for table in tables)
+
+
+
+    def get_allowed_tables(self):
+        return set(self.table_schemas.keys())

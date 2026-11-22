@@ -1,150 +1,210 @@
+import json
 import sqlite3
-from typing import TypedDict,List,Annotated
-from langchain_core.messages import BaseMessage,HumanMessage,AIMessage
+from typing import Annotated, Any, List, TypedDict, Optional, Set
+
+
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_groq import ChatGroq
-from langgraph.graph import START,END,StateGraph,add_messages
-from guardrails.ast_validator import enforce_sql_guardrails,SecurityError
+from langgraph.graph import END, START, StateGraph, add_messages
+from langchain_core.runnables import RunnableConfig
+
+
 from core.vector_retriever import VectorSchemaRetriever
+from guardrails.ast_validator import SecurityError, enforce_sql_guardrails
+
 
 
 class AgentState(TypedDict):
-    messages: Annotated[List[BaseMessage],add_messages]
-    db_path:str
-    sql_query:str
+    messages: Annotated[List[BaseMessage], add_messages]
+    db_path: str
+    sql_query: str
+    sql_params: List[Any]
     execution_result: str
+    query_columns: List[str]
+    query_rows: List[tuple[Any, ...]]
     error_count: int
+    retrieved_tables: List[str]
+    attempts: int
 
 
-def sql_workflow(model:ChatGroq,schema_retriever:VectorSchemaRetriever,checkpointer=None):
-    # STEP 1: The LLM writes the SQL query based on user prompt
-    async def generate_sql_node(state: AgentState):
-        db_schema = schema_retriever.retrieve_relevant_schema(state["messages"][-1].content)
-        
-        # If this is a retry (error_count > 0), forcefully instruct the model to fix the case matching
+
+
+def _extract_sql_and_params(raw_text: str) -> tuple[str, List[Any]]:
+    """Parse JSON {sql, params}; otherwise treat response as plain SQL."""
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```"):
+        lines = [line for line in cleaned.splitlines() if not line.strip().startswith("```")]
+        cleaned = "\n".join(lines).strip()
+
+
+
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict) and "sql" in parsed:
+            sql = str(parsed["sql"]).strip()
+            params = parsed.get("params", [])
+            if not isinstance(params, list):
+                params = list(params) if isinstance(params, tuple) else [params]
+            return sql, params
+    except json.JSONDecodeError:
+        pass
+
+
+    return cleaned, []
+
+
+
+
+def sql_workflow(model: ChatGroq, schema_retriever: VectorSchemaRetriever, checkpointer=None):
+    async def generate_sql_node(state: AgentState, config: RunnableConfig):
+        configurable = (config or {}).get("configurable", {})
+        active_retriever = configurable.get("schema_retriever") or schema_retriever
+
+        latest_user_msg = state["messages"][-1].content
+        db_schema = active_retriever.retrieve_relevant_schema(latest_user_msg)
+        retrieved_tables = getattr(active_retriever, "last_retrieved_tables", []).copy()
+
         retry_instruction = ""
         if state.get("error_count", 0) > 0:
             retry_instruction = (
-                "\n\n[URGENT CORRECTION REQUIRED]\n"
-                f"Your previous query failed or returned no data (Result: {state.get('execution_result')}).\n"
-                "The database text values might have different capitalization (e.g. 'Engineering' instead of 'engineering'). "
-                "You MUST use LOWER(department) = LOWER('engineering') or LIKE '%engineering%' in your WHERE clause!"
+                "\n\n[CORRECTION REQUIRED]\n"
+                f"Previous SQL: {state.get('sql_query', '')}\n"
+                f"Previous Params: {state.get('sql_params', [])}\n"
+                f"Issue: {state.get('execution_result', '')}\n"
+                "Fix the SQL query or parameters using only valid tables/columns from the schema. "
+                "If text filtering returned no rows due to casing, use LOWER(col) = LOWER(?) or LIKE."
             )
 
         prompt = (
-            f"You are an expert SQL generator. Relevant Schema: {db_schema}\n"
-            f"User request: {state['messages'][-1].content}"
+            "You are an expert SQLite SQL generator.\n"
+            f"Relevant Schema:\n{db_schema}\n\n"
+            f"User request: {latest_user_msg}"
             f"{retry_instruction}\n\n"
-            "CRITICAL RULES:\n"
-            "1. Return ONLY a valid SQL SELECT statement. No markdown, no explanations.\n"
-            "2. Always use LOWER() on string columns for filtering."
+            "RULES:\n"
+            "1. Output ONLY a single read-only SELECT or WITH...SELECT statement.\n"
+            "2. Use ? placeholders for literal filter values and put their values in 'params' in order.\n"
+            "3. Respond as JSON with keys 'sql' and 'params' (no markdown fences)."
         )
-        
+
         response = await model.ainvoke([HumanMessage(content=prompt)])
-        raw_sql = response.content.strip()
-        print(f"  [Agentic Loop] LLM Generated SQL: {raw_sql}")
-        return {"sql_query": raw_sql}
+        sql_text, sql_params = _extract_sql_and_params(response.content)
+        attempt_count = state.get("attempts", 0) + 1
+        print(f"  [Agentic Loop] Generated SQL: {sql_text} | Params: {sql_params}")
+        return {
+            "sql_query": sql_text,
+            "sql_params": sql_params,
+            "retrieved_tables": retrieved_tables,
+            "attempts": attempt_count,
+        }
 
-    
-    # STEP 2: Pillar 2 (AST Guardrails) & Database Execution
 
-    async def execute_sql_node(state: AgentState):
+
+    async def execute_sql_node(state: AgentState, config: RunnableConfig):
         raw_sql = state.get("sql_query", "").strip()
-        
-        try:
-            # 1. Run your robust ast_validator guardrail & limit injector
-            safe_sql = enforce_sql_guardrails(raw_sql, max_row_limit=50)
-            
-            # 2. Execute the sanitized SQL
-            conn = sqlite3.connect(state["db_path"])
-            cursor = conn.cursor()
-            cursor.execute(safe_sql)
-            rows = cursor.fetchall()
-            conn.close()
-            
-            is_empty_result = not rows or rows == [()] or rows == [(None,)]
-            if is_empty_result:
-                return {
-                    "execution_result": f"Query returned empty or null results: {rows}.",
-                    "error_count": state.get("error_count", 0) + 1
-                }
+        raw_params = state.get("sql_params", [])
+        current_errors = state.get("error_count", 0)
 
-            print(f"  [Agentic Loop] Query executed successfully. Results: {rows}")
-            return {"execution_result": str(rows), "sql_query": safe_sql}
-            
+
+        configurable = (config or {}).get("configurable", {})
+        active_retriever = configurable.get("schema_retriever") or schema_retriever
+
+        allowed_tables: Optional[Set[str]] = None
+        if active_retriever is not None and hasattr(active_retriever, "get_allowed_tables"):
+            tables = active_retriever.get_allowed_tables()
+            if tables:
+                allowed_tables = tables
+
+        try:
+            safe_sql, safe_params = enforce_sql_guardrails(
+                raw_sql,
+                max_row_limit=50,
+                params=raw_params,
+                allowed_tables=allowed_tables,
+            )
+
+            ro_uri = f"file:{state['db_path']}?mode=ro"
+            conn = sqlite3.connect(ro_uri, uri=True, timeout=5.0)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(safe_sql, safe_params)
+                rows = cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description] if cursor.description else []
+            finally:
+                conn.close()
+
+            # Empty rows, NULL aggregates, and zero are valid SQL results.
+            print(f"  [Agentic Loop] Query executed. Columns: {columns} | Rows: {rows}")
+            return {
+                "sql_query": safe_sql,
+                "sql_params": list(safe_params),
+                "query_columns": columns,
+                "query_rows": rows,
+                "execution_result": json.dumps({"columns": columns, "rows": rows}, default=str),
+                "error_count": 0,
+            }
+
         except SecurityError as sec_err:
-            # Catch security violations explicitly so the LLM knows it was blocked
-            error_msg = str(sec_err)
+            error_msg = f"Security Violation: {sec_err}"
             print(f"  [Guardrail Blocked] {error_msg}")
-            return {
-                "execution_result": error_msg,
-                "error_count": state.get("error_count", 0) + 1
-            }
-        
-        except Exception as db_err:
+            return {"execution_result": error_msg, "error_count": current_errors + 1}
+
+        except sqlite3.Error as db_err:
             error_msg = f"SQL Execution Error: {db_err}"
-            return {
-                "execution_result": error_msg,
-                "error_count": state.get("error_count", 0) + 1
-            }
-# CONDITIONAL ROUTER: Decides whether to loop back or finish
+            print(f"  [DB Error] {error_msg}")
+            return {"execution_result": error_msg, "error_count": current_errors + 1}
+
+
+
     def should_retry_or_summarize(state: AgentState):
         result = state.get("execution_result", "")
         errors = state.get("error_count", 0)
-        
-        # Now ANY mention of failure or 0 rows will trigger a retry up to 3 times
-        if ("Error" in result or "0 rows" in result or result == "[]") and errors < 3:
-            print(f"  [Router] Issue detected. Looping back to self-correct (Attempt {errors + 1})...")
+        is_retryable_issue = (
+            "SQL Execution Error:" in result
+            or "Parameter mismatch:" in result
+            or "Security Violation:" in result
+        )
+        if is_retryable_issue and errors < 3:
+            print(f"  [Router] Retrying self-correction (Attempt {errors + 1}/3)...")
             return "retry"
-        
         return "summarize"
 
-    # STEP 3: Final Answer generation
+
+
     async def summarize_node(state: AgentState):
-        user_query = state["messages"][-1].content.lower()
+        user_query = state["messages"][-1].content
         result = state["execution_result"]
-        
-        # 1. Programmatic guardrail: Intercept mutation requests instantly
+
         mutation_keywords = ["delete", "remove", "drop", "update", "insert", "modify", "clear"]
-        is_mutation_attempt = any(keyword in user_query for keyword in mutation_keywords)
-        
+        is_mutation_attempt = any(kw in user_query.lower() for kw in mutation_keywords)
         if is_mutation_attempt:
             refusal_msg = (
-                f"I cannot perform delete or modification operations because this system is strictly read-only. "
-                f"However, based on your search query, here is the record found:\n\n{result}"
+                "I cannot delete, modify, or clear database records because this system is read-only. "
+                f"Based on your query, here is what was retrieved:\n\n{result}"
             )
             return {"messages": [AIMessage(content=refusal_msg)]}
-        
-        # 2. Standard summarization for read queries
+
         prompt = (
-            f"The user asked: '{user_query}'. "
-            f"The query result was: {result}. "
-            "Write a short, friendly plain-English answer based strictly on the data."
+            f"User question: '{user_query}'\n"
+            f"Query result: {result}\n"
+            "Write a concise, helpful plain-English response grounded strictly in the query result above."
         )
         response = await model.ainvoke([HumanMessage(content=prompt)])
         return {"messages": [AIMessage(content=response.content)]}
 
-    
 
-    
-    #Build Linear Graph Flow
 
-    workflow=StateGraph(AgentState)
-    workflow.add_node("generate_sql",generate_sql_node)
-    workflow.add_node("execute_sql",execute_sql_node)
-    workflow.add_node("summarize",summarize_node)
+    workflow = StateGraph(AgentState)
+    workflow.add_node("generate_sql", generate_sql_node)
+    workflow.add_node("execute_sql", execute_sql_node)
+    workflow.add_node("summarize", summarize_node)
 
-    workflow.add_edge(START,"generate_sql")
-    workflow.add_edge("generate_sql","execute_sql")
-    workflow.add_edge("execute_sql","summarize")
-    # Add the conditional edge loop!
+    workflow.add_edge(START, "generate_sql")
+    workflow.add_edge("generate_sql", "execute_sql")
     workflow.add_conditional_edges(
         "execute_sql",
         should_retry_or_summarize,
-        {
-            "retry": "generate_sql",       # Loops back if it fails
-            "summarize": "summarize"       # Moves forward if successful or max retries hit
-        }
+        {"retry": "generate_sql", "summarize": "summarize"},
     )
-    workflow.add_edge("summarize",END)
+    workflow.add_edge("summarize", END)
 
     return workflow.compile(checkpointer=checkpointer)

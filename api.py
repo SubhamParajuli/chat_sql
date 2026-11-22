@@ -2,36 +2,38 @@ import os
 import shutil
 import uuid
 from contextlib import asynccontextmanager
-from typing import Dict,Any,Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI,HTTPException,UploadFile,File
-from pydantic import BaseModel
 from dotenv import load_dotenv
-
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from langchain_core.messages import HumanMessage
 from langchain_groq import ChatGroq
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from pydantic import BaseModel, Field
 
 from core.vector_retriever import VectorSchemaRetriever
 from core.workflow import sql_workflow
 from main_db_setup import setup_local_database
 
-
 load_dotenv()
 
 
-#pydantic model for i/o validation
-
+# Pydantic models for request/response validation
 class ChatRequest(BaseModel):
-    message:str
-    thread_id:Optional[str]=None
-    db_path:Optional[str]=None
+    message: str
+    thread_id: Optional[str] = None
+    db_path: Optional[str] = None
+
 
 class ChatResponse(BaseModel):
-    thread_id:str
-    response:str
-    generated_sql:str
-    execution_result:str
+    thread_id: str
+    response: str
+    generated_sql: str
+    sql_params: List[Any] = Field(default_factory=list)
+    execution_result: str
+    columns: List[str] = Field(default_factory=list)
+    rows: List[List[Any]] = Field(default_factory=list)
+
 
 class UploadDBResponse(BaseModel):
     status: str
@@ -39,141 +41,150 @@ class UploadDBResponse(BaseModel):
     filename: str
 
 
-#Shared Global Application State
+# Shared global application state
 resources: Dict[str, Any] = {}
 
+
 @asynccontextmanager
-async def lifespan(app:FastAPI):
+async def lifespan(app: FastAPI):
     """
     Manages heavy resources across the application startup and shutdown cycle.
     Prevents reloading models or reconnecting to state DBs on every HTTP request.
     """
+    default_db_path = setup_local_database()
+    os.makedirs("temp_uploads", exist_ok=True)
+    os.makedirs("data", exist_ok=True)
 
-    default_db_path=setup_local_database()
-    os.makedirs("temp_uploads",exist_ok=True)
-    os.makedirs("data",exist_ok=True)
+    model = ChatGroq(model="qwen/qwen3.8-27b", temperature=0)
+    schema_retriever = VectorSchemaRetriever(default_db_path)
 
-    #initialize model
-    model=ChatGroq(model="qwen/qwen3.8-27b",temperature=0)
+    checkpoints_path = os.path.join("data", "checkpoints.db")
+    checkpointer_cm = AsyncSqliteSaver.from_conn_string(checkpoints_path)
+    checkpointer = await checkpointer_cm.__aenter__()
 
-    #initialize default vector schema retriever
-    schema_retriever=VectorSchemaRetriever(default_db_path)
-
-    #Initialize AsyncSqliteSaver for persistent state tracking
-    checkpoints_path=os.path.join("data","checkpoints.db")
-    checkpointer_cm=AsyncSqliteSaver.from_conn_string(checkpoints_path)
-    checkpointer=await checkpointer_cm.__aenter__()
-
-    #compile langgrap agent workflow
     graph = sql_workflow(
-        model=model, 
-        schema_retriever=schema_retriever, 
-        checkpointer=checkpointer
+        model=model,
+        schema_retriever=schema_retriever,
+        checkpointer=checkpointer,
     )
-    
-    # Cache in shared dict
+
     resources["graph"] = graph
     resources["default_db_path"] = default_db_path
     resources["model"] = model
     resources["checkpointer"] = checkpointer
     resources["checkpointer_cm"] = checkpointer_cm
     resources["retrievers"] = {default_db_path: schema_retriever}
-    
+
     print("\n[*] FastAPI Agent Service ready!")
-    yield
-    
-    # Clean shutdown of checkpointer connection
-    await resources["checkpointer_cm"].__aexit__(None, None, None)
-    print("[*] FastAPI Service stopped cleanly.")
+    try:
+        yield
+    finally:
+        await resources["checkpointer_cm"].__aexit__(None, None, None)
+        print("[*] FastAPI Service stopped cleanly.")
+
 
 app = FastAPI(title="Text-to-SQL Agent API", lifespan=lifespan)
 
 
-
-@app.post("/upload-db",response_model=UploadDBResponse)
-async def upload_database(file: UploadFile=File(...)):
+@app.post("/upload-db", response_model=UploadDBResponse)
+async def upload_database(file: UploadFile = File(...)):
     """
-    Receive a custom .db or .sqlite file,save it and dynamically creates/indexes a VectorSchemaRetreiver  for it.
+    Receive a custom .db or .sqlite file, save it, and dynamically create/index
+    a VectorSchemaRetriever for it.
     """
-    if not (file.filename.endswith(".db") or file.filename.endswith(".sqlite")):
+    filename = file.filename or ""
+    if not (filename.endswith(".db") or filename.endswith(".sqlite")):
         raise HTTPException(
             status_code=400,
-            detail="Invalid file format. Only .db or .sqlite files are supported."
+            detail="Invalid file format. Only .db or .sqlite files are supported.",
         )
 
-    saved_path=os.path.join("temp_uploads",f"{uuid.uuid4().hex[:8]}_{file.filename}")
+    saved_path = os.path.join("temp_uploads", f"{uuid.uuid4().hex[:8]}_{filename}")
     try:
         with open(saved_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        
-        # Dynamically create vector retriever for the uploaded database
+
         retriever = VectorSchemaRetriever(saved_path)
         resources["retrievers"][saved_path] = retriever
-        
+
         return UploadDBResponse(
             status="success",
             db_path=saved_path,
-            filename=file.filename
+            filename=filename,
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to process database: {str(e)}")
-    
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to process database: {exc}")
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat_with_agent(request: ChatRequest):
     """
     Main multi-turn conversation endpoint. Handles execution through LangGraph
-    and returns SQL, execution results, and natural language summaries.
+    and returns SQL, bound parameters, execution results, and natural language summaries.
     """
-    # Fallback to default DB if no custom DB specified
     active_db_path = request.db_path or resources["default_db_path"]
-    
+
     if not os.path.exists(active_db_path):
         raise HTTPException(status_code=404, detail=f"Database not found at: {active_db_path}")
-    
-    # 1. Select the retriever per database from resources["retrievers"]
+
     if active_db_path not in resources["retrievers"]:
         resources["retrievers"][active_db_path] = VectorSchemaRetriever(active_db_path)
-    
+
     active_retriever = resources["retrievers"][active_db_path]
 
-    # Session thread management
     thread_id = request.thread_id or f"session_{uuid.uuid4().hex[:8]}"
-    config = {"configurable": {"thread_id": thread_id}}
-    
-    # Pass the active retriever explicitly in state/configurable context if your workflow requires it
-    initial_state = {
+    config: Dict[str, Any] = {
+        "configurable": {
+            "thread_id": thread_id,
+            "schema_retriever": active_retriever,
+        }
+    }
+
+    initial_state: Dict[str, Any] = {
         "messages": [HumanMessage(content=request.message)],
         "db_path": active_db_path,
         "sql_query": "",
+        "sql_params": [],
         "execution_result": "",
-        "error_count": 0
+        "query_columns": [],
+        "query_rows": [],
+        "error_count": 0,
     }
-    
-    # If your workflow/graph runnable accepts the retriever via configurable or state, ensure it's bound here:
-    config["configurable"]["schema_retriever"] = active_retriever
-    
+
     final_sql = ""
+    final_params: List[Any] = []
     final_result = ""
+    final_columns: List[str] = []
+    final_rows: List[List[Any]] = []
     final_response = ""
-    
+
     try:
-        # Stream workflow node updates
         async for event in resources["graph"].astream(initial_state, config=config, stream_mode="updates"):
-            for node_name, update in event.items():
+            for _, update in event.items():
                 if not isinstance(update, dict):
                     continue
                 if "sql_query" in update:
                     final_sql = update["sql_query"]
+                if "sql_params" in update:
+                    final_params = list(update["sql_params"] or [])
                 if "execution_result" in update:
                     final_result = update["execution_result"]
-                if "messages" in update:
-                    final_response = update["messages"][-1].content
-                    
+                if "query_columns" in update:
+                    final_columns = list(update["query_columns"] or [])
+                if "query_rows" in update:
+                    final_rows = [list(r) for r in (update["query_rows"] or [])]
+                if "messages" in update and update["messages"]:
+                    last_msg = update["messages"][-1]
+                    final_response = getattr(last_msg, "content", str(last_msg))
+
         return ChatResponse(
             thread_id=thread_id,
             response=final_response,
             generated_sql=final_sql,
-            execution_result=final_result
+            sql_params=final_params,
+            execution_result=final_result,
+            columns=final_columns,
+            rows=final_rows,
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Workflow execution failed: {str(e)}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Workflow execution failed: {exc}")
