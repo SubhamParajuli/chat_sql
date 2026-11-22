@@ -11,3 +11,4 @@ wheels/
 data
 text_to_sql_benchmark
 .env
+temp_uploads

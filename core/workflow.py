@@ -1,5 +1,7 @@
 import json
 import sqlite3
+import asyncio
+import random
 from typing import Annotated, Any, List, TypedDict, Optional, Set
 
 
@@ -11,6 +13,21 @@ from langchain_core.runnables import RunnableConfig
 
 from core.vector_retriever import VectorSchemaRetriever
 from guardrails.ast_validator import SecurityError, enforce_sql_guardrails
+
+
+async def invoke_with_retry(model, messages, max_attempts=5):
+    """Retry temporary Groq rate-limit errors with exponential backoff."""
+    for attempt in range(max_attempts):
+        try:
+            return await model.ainvoke(messages)
+        except Exception as error:
+            message = str(error).lower()
+            is_rate_limit = "429" in message or "rate_limit" in message or "rate limit" in message or "tokens per minute" in message
+            if not is_rate_limit or attempt == max_attempts - 1:
+                raise
+            wait_seconds = min(30, 2 ** (attempt + 1)) + random.uniform(0, 1)
+            print(f"  [Rate Limit] Waiting {wait_seconds:.1f}s before retry {attempt + 2}/{max_attempts}...")
+            await asyncio.sleep(wait_seconds)
 
 
 
@@ -86,7 +103,7 @@ def sql_workflow(model: ChatGroq, schema_retriever: VectorSchemaRetriever, check
             "3. Respond as JSON with keys 'sql' and 'params' (no markdown fences)."
         )
 
-        response = await model.ainvoke([HumanMessage(content=prompt)])
+        response = await invoke_with_retry(model, [HumanMessage(content=prompt)])
         sql_text, sql_params = _extract_sql_and_params(response.content)
         attempt_count = state.get("attempts", 0) + 1
         print(f"  [Agentic Loop] Generated SQL: {sql_text} | Params: {sql_params}")
@@ -115,9 +132,11 @@ def sql_workflow(model: ChatGroq, schema_retriever: VectorSchemaRetriever, check
                 allowed_tables = tables
 
         try:
+            eval_mode = configurable.get("eval_mode", False)
+            row_limit = 1000 if eval_mode else 50
             safe_sql, safe_params = enforce_sql_guardrails(
                 raw_sql,
-                max_row_limit=50,
+                max_row_limit=row_limit,
                 params=raw_params,
                 allowed_tables=allowed_tables,
             )
@@ -188,8 +207,16 @@ def sql_workflow(model: ChatGroq, schema_retriever: VectorSchemaRetriever, check
             f"Query result: {result}\n"
             "Write a concise, helpful plain-English response grounded strictly in the query result above."
         )
-        response = await model.ainvoke([HumanMessage(content=prompt)])
-        return {"messages": [AIMessage(content=response.content)]}
+        try:
+            response = await invoke_with_retry(model, [HumanMessage(content=prompt)])
+            answer = response.content
+        except Exception as error:
+            # SQL has already executed. Keep its result even if the optional
+            # natural-language summary cannot be generated because of an API error.
+            answer = f"The SQL query executed successfully, but I could not generate a summary right now. Query result: {result}"
+            print(f"  [Summary Warning] {error}")
+
+        return {"messages": [AIMessage(content=answer)]}
 
 
 
